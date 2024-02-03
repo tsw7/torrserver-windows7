@@ -1,0 +1,152 @@
+name: Build latest for Windows 7
+run-name: Check latest TorrServer release and build with go1.21.4 for Windows 7 🚀
+permissions:
+  contents: write
+on: 
+  schedule:
+    # Every day at 15:30 UTC
+    - cron: 30  15  *  *  *
+  workflow_dispatch: 
+
+env: 
+  TS_REPO_NAME: ${{ vars.REPO_VAR__SOURCE_REPO }}
+  W7_REPO_NAME: ${{ github.repository }}
+
+jobs:
+  check_build_needed:
+    name: "Check if new build needed"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get latest ${{ env.TS_REPO_NAME }} release tag
+        id: get_ts_release_tag
+        run: |
+          echo "ts_release_tag=$(curl -s https://api.github.com/repos/$TS_REPO_NAME/releases/latest | jq '.tag_name' | sed 's/\"//g')" >> "$GITHUB_ENV"
+      - name: Get latest ${{ env.W7_REPO_NAME }} release tag
+        run: echo "w7_release_tag=$(curl -s https://api.github.com/repos/$W7_REPO_NAME/releases/latest | jq '.tag_name' | sed 's/\"//g')" >> "$GITHUB_ENV"
+      - name: Decide that there is a need to compile a new release
+        run: |
+          echo "is_needed_build=${{ ((env.w7_release_tag == '')  || (env.w7_release_tag == 'null') || (env.w7_release_tag != env.ts_release_tag)) && 'TRUE' || 'FALSE' }}" >> "$GITHUB_ENV"
+      - name: Export variables
+        id: export_vars
+        run: |
+          echo "is_needed_build=$is_needed_build" >> "$GITHUB_OUTPUT"
+          echo "ts_release_tag=$ts_release_tag" >> "$GITHUB_OUTPUT"
+          echo "w7_release_tag=$w7_release_tag" >> "$GITHUB_OUTPUT"
+
+          echo "ts_repo_name: $TS_REPO_NAME"
+          echo "w7_repo_name: $W7_REPO_NAME"
+          echo "Need build: $is_needed_build"
+          echo "TS release tag: $ts_release_tag"
+          echo "W7 release tag: $w7_release_tag"
+
+    outputs:
+      is_needed_build: ${{ steps.export_vars.outputs.is_needed_build }}
+      ts_release_tag: ${{ steps.export_vars.outputs.ts_release_tag }}
+  
+  print_data_and_check:
+    name: "Print data"
+    needs: check_build_needed
+    runs-on: ubuntu-latest
+    env: 
+      is_needed_build: ${{ needs.check_build_needed.outputs.is_needed_build }}
+      ts_release_tag:  ${{ needs.check_build_needed.outputs.ts_release_tag }}
+    steps:
+      - name: Print data
+        run: |
+          echo "is_needed_build=$is_needed_build"
+          echo "ts_release_tag=$ts_release_tag"
+      - name: Fail on empty TS_RELEASE_TAG
+        if:  ${{ env.ts_release_tag == '' }}
+        run: |
+          echo "::error ::TS_RELEASE_TAG ($ts_release_tag) is EMPTY"
+          exit 1
+      - name: Succeed on IS_NEED_BUILD is TRUE
+        if:  ${{ env.is_needed_build != 'TRUE' }}"
+        run: |
+          echo "::notice ::IS_NEED_BUILD is TRUE"
+    outputs:
+      is_needed_build: ${{ env.is_needed_build }}
+      ts_release_tag: ${{ env.ts_release_tag }}
+
+  build_release:
+    name: "Build release"
+    needs: print_data_and_check
+    runs-on: ubuntu-latest
+    env: 
+      is_needed_build: ${{ needs.print_data_and_check.outputs.is_needed_build }}
+      ts_release_tag:  ${{ needs.print_data_and_check.outputs.ts_release_tag }}
+    if: ${{ needs.print_data_and_check.outputs.is_needed_build == 'TRUE'}}
+    steps:
+      - name: Check out latest release
+        uses: actions/checkout@v4
+        with: 
+          repository: ${{ env.TS_REPO_NAME }}
+          ref: ${{ env.ts_release_tag }}
+          lfs: true
+          submodules: true
+          path: torrserver
+      - name: Install node
+        uses: actions/setup-node@v4
+        with: 
+          node-version: '18.19.0'
+      - name: Install Go 
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.4'
+      - name: Install Yarn
+        run: |
+          npm install --global yarn
+      - name: Install modules
+        working-directory: ./torrserver/web
+        run: |
+          npm install
+      - name: Install swag
+        run: |
+          go install github.com/swaggo/swag/cmd/swag@latest
+      - name: Run swag
+        working-directory: ./torrserver/server
+        run: |
+          $HOME/go/bin/swag init -g web/server.go
+          $HOME/go/bin/swag fmt
+      - name: Build web
+        run: |
+          NODE_OPTIONS=--openssl-legacy-provider yarn build
+        working-directory: ./torrserver/web
+      - name: Remove non-windows platforms
+        working-directory: ./torrserver
+        run: |
+          sed -i -r "/^\s+\x27(linux|darwin|freebsd)\/\S+\x27\s*$/d" ./build-all.sh
+          sed -i -r "/^\s+\x22\S+:\S+linux-android\S+\x22\s*$/d" ./build-all.sh
+      - name: Build TorrServer
+        working-directory: ./torrserver
+        run: |
+          chmod +x ./build-all.sh
+          ./build-all.sh
+      - name: Create release
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ env.ts_release_tag }} for Windows 7
+          tag_name:  ${{ env.ts_release_tag }}
+          draft: false
+          prerelease: false
+          files: |
+            ./torrserver/dist/*.exe
+          body: |
+            ${{ env.ts_release_tag }} для Windows 7
+            Эта сборка выполнена автоматически и предоставляется AS-IS.
+            Скрипт сборки вы можете найти в репозитории.
+
+            Начиная с go1.21.5 приложения, собранные с его помощью, не запускаются в Windows 7.
+            Поддержка Windows 7 прекращена с go1.21.
+            С помощью go1.20 уже нельзя собрать TorrServer.
+            
+            Таким образом, неизвестно, как долго получится поддерживать 
+            сборку с помощью go1.21.4, последней совместимой с Windows 7.
+            
+            This is automated daily build and provided AS-IS
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+      - run: echo "Finished"
